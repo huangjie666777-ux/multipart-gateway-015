@@ -2,14 +2,26 @@ package main
 
 import (
 	"fmt"
-	"github.com/huangjie666777-ux/schema-registry-015/registry"
+	"mime/multipart"
+	"net/textproto"
+	"strings"
+
+	"github.com/huangjie666777-ux/multipart-gateway-015/forms"
 )
 
 func main() {
-	s := registry.NewStore()
-	v, err := s.Register("demo", "orders", []byte(`{"type":"object","properties":{"id":{"type":"string"}}}`), nil)
+	var b strings.Builder
+	w := multipart.NewWriter(&b)
+	_ = w.WriteField("title", "demo")
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", "form-data; name=\"file\"; filename=\"hello.txt\"")
+	h.Set("Content-Type", "text/plain")
+	p, _ := w.CreatePart(h)
+	_, _ = p.Write([]byte("hello"))
+	_ = w.Close()
+	result, err := forms.Parse(w.FormDataContentType(), strings.NewReader(b.String()), forms.DefaultLimits())
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("registered v%d fingerprint=%s\n", v.Number, v.Fingerprint)
+	fmt.Printf("parts=%d first=%+v\n", len(result.Parts), result.Parts[0])
 }

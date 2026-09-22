@@ -5,61 +5,69 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/huangjie666777-ux/schema-registry-015/registry"
+	"github.com/huangjie666777-ux/multipart-gateway-015/forms"
 )
 
-type registerRequest struct {
-	Schema           json.RawMessage `json:"schema"`
-	ExpectedRevision *uint64         `json:"expectedRevision,omitempty"`
+type server struct {
+	mu      sync.RWMutex
+	results map[string]forms.Result
+	limits  forms.Limits
 }
 
 func main() {
-	store := registry.NewStore()
+	s := &server{results: make(map[string]forms.Result), limits: forms.DefaultLimits()}
 	r := chi.NewRouter()
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	r.Put("/v1/tenants/{tenant}/subjects/{subject}/versions", func(w http.ResponseWriter, req *http.Request) {
-		var in registerRequest
-		if json.NewDecoder(req.Body).Decode(&in) != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-		v, err := store.Register(chi.URLParam(req, "tenant"), chi.URLParam(req, "subject"), in.Schema, in.ExpectedRevision)
-		if err != nil {
-			code := http.StatusBadRequest
-			if errors.Is(err, registry.ErrConflict) {
-				code = http.StatusConflict
-			}
-			writeError(w, code, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusCreated, v)
-	})
-	r.Get("/v1/tenants/{tenant}/subjects/{subject}/versions/latest", func(w http.ResponseWriter, req *http.Request) {
-		v, err := store.Latest(chi.URLParam(req, "tenant"), chi.URLParam(req, "subject"))
-		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, v)
-	})
+	r.Post("/v1/forms/{form}", s.parseForm)
+	r.Get("/v1/forms/{form}/latest", s.latest)
 	addr := os.Getenv("ADDR")
 	if addr == "" {
-		addr = ":18116"
+		addr = ":18115"
 	}
 	if err := http.ListenAndServe(addr, r); err != nil {
 		panic(err)
 	}
 }
-func writeJSON(w http.ResponseWriter, code int, v any) {
+
+func (s *server) parseForm(w http.ResponseWriter, req *http.Request) {
+	result, err := forms.Parse(req.Header.Get("Content-Type"), req.Body, s.limits)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, forms.ErrLimitExceeded) {
+			code = http.StatusRequestEntityTooLarge
+		}
+		writeError(w, code, err.Error())
+		return
+	}
+	key := chi.URLParam(req, "form")
+	s.mu.Lock()
+	s.results[key] = result
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *server) latest(w http.ResponseWriter, req *http.Request) {
+	s.mu.RLock()
+	result, ok := s.results[chi.URLParam(req, "form")]
+	s.mu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "form not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func writeJSON(w http.ResponseWriter, code int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(value)
 }
-func writeError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+
+func writeError(w http.ResponseWriter, code int, message string) {
+	writeJSON(w, code, map[string]string{"error": message})
 }

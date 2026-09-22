@@ -1,4 +1,4 @@
-module github.com/huangjie666777-ux/schema-registry-015
+module github.com/huangjie666777-ux/multipart-gateway-015
 
 go 1.27.1
 
