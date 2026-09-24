@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"sync"
@@ -13,12 +15,12 @@ import (
 
 type server struct {
 	mu      sync.RWMutex
-	results map[string]forms.Result
+	results map[string]*forms.Result
 	limits  forms.Limits
 }
 
 func main() {
-	s := &server{results: make(map[string]forms.Result), limits: forms.DefaultLimits()}
+	s := &server{results: make(map[string]*forms.Result), limits: forms.DefaultLimits()}
 	r := chi.NewRouter()
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -35,8 +37,14 @@ func main() {
 }
 
 func (s *server) parseForm(w http.ResponseWriter, req *http.Request) {
-	result, err := forms.Parse(req.Header.Get("Content-Type"), req.Body, s.limits)
+	body := &contextReader{ctx: req.Context(), r: req.Body}
+	result, err := forms.Parse(req.Header.Get("Content-Type"), body, s.limits)
 	if err != nil {
+		// Client disconnected (or deadline exceeded): stop immediately,
+		// write nothing, and never replace the previous good result.
+		if req.Context().Err() != nil {
+			return
+		}
 		code := http.StatusBadRequest
 		if errors.Is(err, forms.ErrLimitExceeded) {
 			code = http.StatusRequestEntityTooLarge
@@ -44,11 +52,43 @@ func (s *server) parseForm(w http.ResponseWriter, req *http.Request) {
 		writeError(w, code, err.Error())
 		return
 	}
+	if req.Context().Err() != nil {
+		return
+	}
 	key := chi.URLParam(req, "form")
 	s.mu.Lock()
-	s.results[key] = result
+	s.results[key] = &result
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, result)
+}
+
+// contextReader turns request cancellation into a read error even while a
+// Read on the underlying body is blocked, so parsing and SHA-256 work stop
+// promptly on client disconnect.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *contextReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	type readResult struct {
+		n   int
+		err error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		n, err := c.r.Read(p)
+		ch <- readResult{n, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-c.ctx.Done():
+		return 0, c.ctx.Err()
+	}
 }
 
 func (s *server) latest(w http.ResponseWriter, req *http.Request) {

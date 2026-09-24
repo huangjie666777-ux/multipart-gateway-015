@@ -23,5 +23,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("parts=%d first=%+v\n", len(result.Parts), result.Parts[0])
+	fmt.Printf("parts=%d\n", len(result.Parts))
+	for i, part := range result.Parts {
+		fmt.Printf("  [%d] %+v\n", i, part)
+	}
 }
